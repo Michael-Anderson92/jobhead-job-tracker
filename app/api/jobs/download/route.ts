@@ -5,7 +5,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllJobsForDownloadAction } from '@/utils/actions';
+import { auth } from '@clerk/nextjs/server';
+import prisma from '@/utils/db';
 
 /**
  * GET /api/jobs/download
@@ -13,7 +14,24 @@ import { getAllJobsForDownloadAction } from '@/utils/actions';
  */
 export async function GET(request: NextRequest) {
   try {
-    const jobs = await getAllJobsForDownloadAction();
+    // Authenticate user
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+
+    const jobs = await prisma.job.findMany({
+      where: {
+        clerkId: userId,
+      },
+      orderBy: {
+        appliedDate: "desc",
+      },
+    });
+
     return NextResponse.json(jobs);
   } catch (error) {
     console.error('Error fetching jobs for download:', error);

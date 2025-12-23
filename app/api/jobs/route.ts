@@ -1,13 +1,15 @@
 /**
  * API Route: /api/jobs
  *
- * Handles job-related HTTP requests and wraps Server Actions.
- * This route allows Client Components to fetch data without directly calling Server Actions.
+ * Handles job-related HTTP requests with direct database access.
+ * This route allows Client Components to fetch data via standard HTTP requests.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllJobsAction, createJobAction } from '@/utils/actions';
-import { CreateAndEditJobType } from '@/utils/types';
+import { auth } from '@clerk/nextjs/server';
+import prisma from '@/utils/db';
+import { CreateAndEditJobType, createAndEditJobSchema, sanitizeJobInput, JobType } from '@/utils/types';
+import { Prisma } from '@prisma/client';
 
 /**
  * GET /api/jobs
@@ -21,21 +23,56 @@ import { CreateAndEditJobType } from '@/utils/types';
  */
 export async function GET(request: NextRequest) {
   try {
-    const searchParams = request.nextUrl.searchParams;
+    // Authenticate user
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
 
+    const searchParams = request.nextUrl.searchParams;
     const search = searchParams.get('search') || undefined;
     const jobStatus = searchParams.get('jobStatus') || undefined;
     const page = searchParams.get('page') ? parseInt(searchParams.get('page')!) : 1;
     const limit = searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : 10;
 
-    const result = await getAllJobsAction({
-      search,
-      jobStatus,
-      page,
-      limit,
-    });
+    // Build where clause
+    let whereClause: Prisma.JobWhereInput = {
+      clerkId: userId,
+    };
 
-    return NextResponse.json(result);
+    if (search) {
+      whereClause = {
+        ...whereClause,
+        OR: [
+          { position: { contains: search, mode: 'insensitive' } },
+          { company: { contains: search, mode: 'insensitive' } },
+        ],
+      };
+    }
+
+    if (jobStatus && jobStatus !== 'all') {
+      whereClause = {
+        ...whereClause,
+        status: jobStatus,
+      };
+    }
+
+    // Fetch jobs with pagination
+    const skip = (page - 1) * limit;
+    const [jobs, count] = await Promise.all([
+      prisma.job.findMany({
+        where: whereClause,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.job.count({ where: whereClause }),
+    ]);
+
+    return NextResponse.json({ jobs, count });
   } catch (error) {
     console.error('Error fetching jobs:', error);
     return NextResponse.json(
@@ -53,16 +90,30 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
-    const body: CreateAndEditJobType = await request.json();
-
-    const job = await createJobAction(body);
-
-    if (!job) {
+    // Authenticate user
+    const { userId } = await auth();
+    if (!userId) {
       return NextResponse.json(
-        { error: 'Failed to create job' },
-        { status: 400 }
+        { error: 'Unauthorized' },
+        { status: 401 }
       );
     }
+
+    const body: CreateAndEditJobType = await request.json();
+
+    // Validate input data with Zod
+    const validatedData = createAndEditJobSchema.parse(body);
+
+    // Sanitize data (convert empty strings to null)
+    const sanitizedData = sanitizeJobInput(validatedData);
+
+    // Create job in database
+    const job: JobType = await prisma.job.create({
+      data: {
+        ...sanitizedData,
+        clerkId: userId,
+      },
+    });
 
     return NextResponse.json(job, { status: 201 });
   } catch (error) {

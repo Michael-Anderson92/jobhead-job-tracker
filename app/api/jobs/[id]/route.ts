@@ -5,8 +5,9 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getSingleJobAction, updateJobAction, deleteJobAction } from '@/utils/actions';
-import { CreateAndEditJobType } from '@/utils/types';
+import { auth } from '@clerk/nextjs/server';
+import prisma from '@/utils/db';
+import { CreateAndEditJobType, createAndEditJobSchema, sanitizeJobInput, JobType } from '@/utils/types';
 
 /**
  * GET /api/jobs/[id]
@@ -17,12 +18,31 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
-    const job = await getSingleJobAction(params.id);
+    // Authenticate user
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+
+    const job = await prisma.job.findUnique({
+      where: { id: params.id },
+    });
 
     if (!job) {
       return NextResponse.json(
         { error: 'Job not found' },
         { status: 404 }
+      );
+    }
+
+    // Ensure user owns this job
+    if (job.clerkId !== userId) {
+      return NextResponse.json(
+        { error: 'Forbidden' },
+        { status: 403 }
       );
     }
 
@@ -47,16 +67,31 @@ export async function PUT(
   { params }: { params: { id: string } }
 ) {
   try {
-    const body: CreateAndEditJobType = await request.json();
-
-    const job = await updateJobAction(params.id, body);
-
-    if (!job) {
+    // Authenticate user
+    const { userId } = await auth();
+    if (!userId) {
       return NextResponse.json(
-        { error: 'Failed to update job' },
-        { status: 400 }
+        { error: 'Unauthorized' },
+        { status: 401 }
       );
     }
+
+    const body: CreateAndEditJobType = await request.json();
+
+    // Validate input data with Zod
+    const validatedData = createAndEditJobSchema.parse(body);
+
+    // Sanitize data (convert empty strings to null)
+    const sanitizedData = sanitizeJobInput(validatedData);
+
+    // Update job (only if user owns it)
+    const job: JobType = await prisma.job.update({
+      where: {
+        id: params.id,
+        clerkId: userId, // Ensure user owns the job
+      },
+      data: sanitizedData,
+    });
 
     return NextResponse.json(job);
   } catch (error) {
@@ -77,14 +112,22 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    const job = await deleteJobAction(params.id);
-
-    if (!job) {
+    // Authenticate user
+    const { userId } = await auth();
+    if (!userId) {
       return NextResponse.json(
-        { error: 'Failed to delete job' },
-        { status: 400 }
+        { error: 'Unauthorized' },
+        { status: 401 }
       );
     }
+
+    // Delete job (only if user owns it)
+    const job = await prisma.job.delete({
+      where: {
+        id: params.id,
+        clerkId: userId, // Ensure user owns the job
+      },
+    });
 
     return NextResponse.json(job);
   } catch (error) {
